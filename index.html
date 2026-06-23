@@ -28,6 +28,7 @@
   .btn{background:var(--accent);color:#0a0a0f;font-weight:700;border:none;border-radius:10px;padding:13px 20px;font-size:16px;cursor:pointer;width:100%;max-width:340px;transition:opacity .2s}
   .btn:hover{opacity:.88}.btn:disabled{opacity:.35;cursor:not-allowed}
   .hint{font-size:12px;color:var(--muted);text-align:center;max-width:340px;line-height:1.6}
+  .room-link{font-size:12px;color:var(--accent);word-break:break-all;text-align:center;max-width:340px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px 12px;cursor:pointer}
   #chat{flex:1;display:none;flex-direction:column;overflow:hidden}
   #msgs{flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:10px}
   .bubble{max-width:80%;padding:9px 13px;border-radius:14px;font-size:15px;line-height:1.5;word-break:break-word}
@@ -53,17 +54,23 @@
 
 <div id="join">
   <h2>Join the Mesh</h2>
-  <p>Open this page on any device. Enter the same channel on each to connect instantly.</p>
+  <p>Create a room and share the link — or paste a room link you received.</p>
   <div class="field">
     <label>Your name</label>
     <input type="text" id="nameIn" placeholder="Enter your name" maxlength="24" autocomplete="off">
   </div>
-  <div class="field">
-    <label>Channel</label>
-    <input type="text" id="chanIn" placeholder="e.g. cooper-test" maxlength="64" autocomplete="off">
+  <div id="roomLinkWrap" style="display:none" class="field">
+    <label>Room link (tap to copy)</label>
+    <div class="room-link" id="roomLink" onclick="copyLink()"></div>
   </div>
-  <button class="btn" id="joinBtn" onclick="joinMesh()">Join Mesh</button>
-  <p class="hint">Same channel = same mesh. Messages travel peer-to-peer via WebRTC.</p>
+  <button class="btn" id="createBtn" onclick="createRoom()">Create Room</button>
+  <div style="color:var(--muted);font-size:13px">— or —</div>
+  <div class="field">
+    <label>Paste a room link or ID</label>
+    <input type="text" id="roomIn" placeholder="Paste link or room ID" autocomplete="off">
+  </div>
+  <button class="btn" style="background:var(--accent2)" onclick="joinRoom()">Join Room</button>
+  <p class="hint">Share the room link with anyone. Messages travel peer-to-peer via WebRTC.</p>
 </div>
 
 <div id="chat">
@@ -84,18 +91,10 @@
 //# sourceMappingURL=peerjs.min.js.map
 </script>
 <script>
-// Strategy:
-// - Slots are named: "[channel]-0", "[channel]-1", ... "[channel]-9"
-// - On join, claim the lowest free slot (try 0, if unavailable try 1, etc.)
-// - After claiming, connect to all OTHER occupied slots
-// - Accept incoming connections from peers who join later
-// - Poll every 6s to pick up new peers
-
-var myPeer, myName, myChannel, mySlotId;
+var myPeer, myName, myRoomId, hostPeerId;
 var connections = {};
 var peerNames   = {};
 var PEERJS = {host:'0.peerjs.com', port:443, path:'/', secure:true, debug:0};
-var MAX_SLOTS = 8;
 
 function gel(id){return document.getElementById(id);}
 function msgTime(){return new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});}
@@ -105,7 +104,7 @@ function updateCount(){
   var n=Object.keys(connections).length;
   gel('pcnt').textContent=n+(n===1?' peer':' peers');
   gel('pcnt').style.display=n>0?'':'none';
-  setStatus(n>0?'Connected · '+myChannel+' ('+n+' peer'+(n===1?'':'s')+')':'Waiting for peers · '+myChannel,'on');
+  setStatus(n>0?'Connected ('+n+' peer'+(n===1?'':'s')+')':'Waiting for peers…','on');
 }
 function addSys(txt){
   var el=document.createElement('div');el.className='sys';el.textContent=txt;
@@ -121,7 +120,6 @@ function broadcast(data,excludeId){
     if(pid!==excludeId&&connections[pid]&&connections[pid].open)connections[pid].send(data);
   });
 }
-function slotId(n){return myChannel+'-'+n;}
 
 function setupConn(conn){
   function onOpen(){
@@ -139,6 +137,14 @@ function setupConn(conn){
     } else if(data.type==='msg'){
       addBubble(peerNames[conn.peer]||'peer',data.text,false);
       broadcast(data,conn.peer);
+    } else if(data.type==='peers'){
+      // Host sent us list of other peer IDs — connect to them directly
+      data.ids.forEach(function(pid){
+        if(pid!==myPeer.id&&!connections[pid]){
+          var c=myPeer.connect(pid,{reliable:true});
+          setupConn(c);
+        }
+      });
     }
   });
   conn.on('close',function(){
@@ -149,67 +155,96 @@ function setupConn(conn){
   conn.on('error',function(e){console.warn('conn err',e.type);});
 }
 
-// Connect to a specific slot ID (ignores peer-unavailable)
-function connectToSlot(sid){
-  if(sid===mySlotId||connections[sid])return;
-  var conn=myPeer.connect(sid,{reliable:true});
-  var t=setTimeout(function(){conn.close();},4000);
-  conn.on('open',function(){clearTimeout(t);setupConn(conn);});
-  conn.on('error',function(){clearTimeout(t);});
+function genId(){
+  return Math.random().toString(36).slice(2,8)+Math.random().toString(36).slice(2,8);
 }
 
-function scanPeers(){
-  for(var i=0;i<MAX_SLOTS;i++)connectToSlot(slotId(i));
-}
-
-// Try to claim slot n; if taken, try n+1
-function claimSlot(n){
-  if(n>=MAX_SLOTS){
-    // All slots full — just connect to all of them
-    showChat();
-    scanPeers();
-    setInterval(scanPeers,6000);
-    return;
-  }
-  var sid=slotId(n);
-  var peer=new Peer(sid,PEERJS);
-  peer.on('open',function(){
-    myPeer=peer;
-    mySlotId=sid;
-    showChat();
-    addSys('You joined as "'+myName+'" on channel "'+myChannel+'"');
-    setStatus('Waiting for peers · '+myChannel,'on');
-    peer.on('connection',function(conn){setupConn(conn);});
-    // Connect to all lower slots (they exist, we just couldn't claim them)
-    for(var i=0;i<n;i++)connectToSlot(slotId(i));
-    setInterval(scanPeers,6000);
-  });
-  peer.on('error',function(e){
-    if(e.type==='unavailable-id'){
-      peer.destroy();
-      claimSlot(n+1);
-    } else {
-      setStatus('Error: '+e.type,'err');
-      console.error(e);
-    }
-  });
-}
-
-function showChat(){
-  gel('join').style.display='none';
-  gel('chat').style.display='flex';
-  gel('txt').focus();
-}
-
-function joinMesh(){
+function createRoom(){
   myName=gel('nameIn').value.trim()||'Anonymous';
-  myChannel='m-'+(gel('chanIn').value.trim().toLowerCase().replace(/[^a-z0-9]/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'')||'mesh');
   localStorage.setItem('mesh-name',myName);
-  localStorage.setItem('mesh-chan',gel('chanIn').value.trim());
-  gel('joinBtn').disabled=true;
-  setStatus('Connecting…');
-  claimSlot(0);
+  myRoomId=genId(); // fresh random ID — no ghost conflicts
+  var hostId='host-'+myRoomId;
+  var link=location.origin+location.pathname+'#'+myRoomId;
+  gel('roomLink').textContent=link;
+  gel('roomLinkWrap').style.display='';
+  gel('createBtn').textContent='Waiting for peers…';
+  gel('createBtn').disabled=true;
+  setStatus('Starting room…');
+
+  myPeer=new Peer(hostId,PEERJS);
+  myPeer.on('open',function(){
+    hostPeerId=hostId;
+    gel('join').style.display='none';
+    gel('chat').style.display='flex';
+    gel('txt').focus();
+    addSys('Room created. Share this link with others:');
+    addSys(link);
+    setStatus('Waiting for peers…','on');
+    myPeer.on('connection',function(conn){
+      setupConn(conn);
+      // Tell new peer about everyone else
+      conn.on('open',function(){
+        var ids=Object.keys(connections).filter(function(p){return p!==conn.peer;});
+        if(ids.length)conn.send({type:'peers',ids:ids});
+      });
+    });
+  });
+  myPeer.on('error',function(e){setStatus('Error: '+e.type,'err');console.error(e);});
 }
+
+function joinRoom(){
+  myName=gel('nameIn').value.trim()||'Anonymous';
+  localStorage.setItem('mesh-name',myName);
+  var input=gel('roomIn').value.trim()||location.hash.slice(1);
+  // Extract room ID from full URL or bare ID
+  var match=input.match(/[#/]?([a-z0-9]{12,})$/i);
+  myRoomId=match?match[1]:input;
+  hostPeerId='host-'+myRoomId;
+
+  if(!myRoomId){alert('Paste a room link first.');return;}
+
+  gel('joinBtn') && (gel('joinBtn').disabled=true);
+  setStatus('Connecting…');
+
+  myPeer=new Peer(PEERJS);
+  myPeer.on('open',function(){
+    gel('join').style.display='none';
+    gel('chat').style.display='flex';
+    gel('txt').focus();
+    addSys('Connecting to room…');
+    var conn=myPeer.connect(hostPeerId,{reliable:true});
+    setupConn(conn);
+    myPeer.on('connection',function(c){setupConn(c);});
+    setStatus('Joining room…','on');
+  });
+  myPeer.on('error',function(e){
+    if(e.type==='peer-unavailable'){
+      setStatus('Room not found or host left','err');
+      addSys('Could not find room. Check the link or ask host to recreate.');
+      return;
+    }
+    setStatus('Error: '+e.type,'err');
+    console.error(e);
+  });
+}
+
+function copyLink(){
+  var link=gel('roomLink').textContent;
+  navigator.clipboard&&navigator.clipboard.writeText(link).then(function(){addSys('Link copied!');});
+}
+
+// Auto-join if URL has a hash room ID
+window.addEventListener('load',function(){
+  var sn=localStorage.getItem('mesh-name');
+  if(sn)gel('nameIn').value=sn;
+  if(location.hash.length>1){
+    gel('roomIn').value=location.origin+location.pathname+location.hash;
+  }
+});
+
+gel('txt').addEventListener('keydown',function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();doSend();}});
+gel('txt').addEventListener('input',function(){gel('txt').style.height='auto';gel('txt').style.height=Math.min(gel('txt').scrollHeight,120)+'px';});
+gel('nameIn').addEventListener('keydown',function(e){if(e.key==='Enter')gel('nameIn').blur();});
 
 function doSend(){
   var txt=gel('txt').value.trim();
@@ -218,14 +253,6 @@ function doSend(){
   addBubble(myName,txt,true);
   gel('txt').value='';gel('txt').style.height='auto';
 }
-
-var sn=localStorage.getItem('mesh-name'),sc=localStorage.getItem('mesh-chan');
-if(sn)gel('nameIn').value=sn;
-if(sc)gel('chanIn').value=sc;
-gel('txt').addEventListener('keydown',function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();doSend();}});
-gel('txt').addEventListener('input',function(){gel('txt').style.height='auto';gel('txt').style.height=Math.min(gel('txt').scrollHeight,120)+'px';});
-gel('nameIn').addEventListener('keydown',function(e){if(e.key==='Enter')gel('chanIn').focus();});
-gel('chanIn').addEventListener('keydown',function(e){if(e.key==='Enter')joinMesh();});
 </script>
 </body>
 </html>
