@@ -1,0 +1,16 @@
+{
+  "name": "Mesh",
+  "short_name": "Mesh",
+  "description": "Decentralized local mesh network messenger",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#0a0a0f",
+  "theme_color": "#0a0a0f",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect width='192' height='192' rx='32' fill='%230a0a0f'/><text y='130' x='96' text-anchor='middle' font-size='120' fill='%236ee7b7'>◈</text></svg>",
+      "sizes": "192x192",
+      "type": "image/svg+xml"
+    }
+  ]
+}
