@@ -55,7 +55,7 @@
 
 <div id="join">
   <h2>Join the Mesh</h2>
-  <p>Open this page on any device. Enter the same channel on each device to connect — no accounts, no servers.</p>
+  <p>Open this page on any device. Enter the same channel on each to connect instantly.</p>
   <div class="field">
     <label>Your name</label>
     <input type="text" id="nameIn" placeholder="Enter your name" maxlength="24" autocomplete="off">
@@ -65,7 +65,7 @@
     <input type="text" id="chanIn" placeholder="e.g. cooper-test" maxlength="64" autocomplete="off">
   </div>
   <button class="btn" id="joinBtn" onclick="joinMesh()">Join Mesh</button>
-  <p class="hint">Same channel = same mesh. All messages travel peer-to-peer via WebRTC.</p>
+  <p class="hint">Same channel = same mesh. Messages are end-to-end encrypted P2P via WebRTC.</p>
 </div>
 
 <div id="chat">
@@ -86,12 +86,10 @@
 //# sourceMappingURL=peerjs.min.js.map
 </script>
 <script>
-// ── state ─────────────────────────────────────────────────────────────────────
-var myPeer, myName, myChannel;
-var connections = {};   // peerId -> DataConnection
-var peerNames   = {};   // peerId -> display name
+var myPeer, myName, myChannel, hostId;
+var connections = {};
+var peerNames   = {};
 
-// ── helpers ───────────────────────────────────────────────────────────────────
 function gel(id) { return document.getElementById(id); }
 function msgTime() { return new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); }
 function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -117,36 +115,32 @@ function addBubble(who, text, isMe) {
   gel('msgs').appendChild(el); gel('msgs').scrollTop = 99999;
 }
 
-// ── connection setup ──────────────────────────────────────────────────────────
+function broadcast(data, excludeId) {
+  Object.keys(connections).forEach(function(pid) {
+    if (pid !== excludeId && connections[pid] && connections[pid].open) {
+      connections[pid].send(data);
+    }
+  });
+}
+
 function setupConn(conn) {
   conn.on('open', function() {
     connections[conn.peer] = conn;
-    // send our name
     conn.send({ type: 'name', name: myName });
     updateCount();
     setStatus('Connected · ' + myChannel, 'on');
-    addSys('Connected to a peer');
   });
-
   conn.on('data', function(data) {
     if (data.type === 'name') {
+      var wasUnknown = !peerNames[conn.peer];
       peerNames[conn.peer] = data.name;
-      // update any "Connected to a peer" message with real name
-      var msgs = gel('msgs').children;
-      for (var i = msgs.length-1; i >= 0; i--) {
-        if (msgs[i].className === 'sys' && msgs[i].textContent === 'Connected to a peer') {
-          msgs[i].textContent = data.name + ' joined';
-          break;
-        }
-      }
+      if (wasUnknown) addSys(data.name + ' joined');
     } else if (data.type === 'msg') {
-      var who = peerNames[conn.peer] || conn.peer.slice(0,8);
+      var who = peerNames[conn.peer] || conn.peer.slice(-6);
       addBubble(who, data.text, false);
-      // forward to other peers (mesh relay)
       broadcast(data, conn.peer);
     }
   });
-
   conn.on('close', function() {
     var who = peerNames[conn.peer] || 'A peer';
     delete connections[conn.peer];
@@ -155,119 +149,90 @@ function setupConn(conn) {
     addSys(who + ' left');
     if (Object.keys(connections).length === 0) setStatus('Waiting for peers · ' + myChannel, 'on');
   });
-
-  conn.on('error', function(e) { console.warn('conn error', e); });
+  conn.on('error', function(e) { console.warn('conn err', e); });
 }
 
-function broadcast(data, excludeId) {
-  Object.keys(connections).forEach(function(pid) {
-    if (pid !== excludeId && connections[pid].open) {
-      connections[pid].send(data);
+function joinMesh() {
+  myName    = gel('nameIn').value.trim() || 'Anonymous';
+  myChannel = gel('chanIn').value.trim().toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g,'-').replace(/^-|-$/g,'') || 'mesh';
+  hostId    = 'meshnet-v2-' + myChannel;
+  localStorage.setItem('mesh-name', myName);
+  localStorage.setItem('mesh-chan', gel('chanIn').value.trim());
+  gel('joinBtn').disabled = true;
+  setStatus('Connecting…');
+
+  // Try to register AS the host first
+  myPeer = new Peer(hostId, {
+    host: '0.peerjs.com', port: 443, path: '/', secure: true, debug: 0
+  });
+
+  myPeer.on('open', function() {
+    // We ARE the host — wait for others to connect to us
+    showChat();
+    addSys('You are first in "' + myChannel + '" — waiting for others…');
+    setStatus('Waiting for peers · ' + myChannel, 'on');
+    myPeer.on('connection', function(conn) { setupConn(conn); });
+  });
+
+  myPeer.on('error', function(e) {
+    if (e.type === 'unavailable-id') {
+      // Host slot taken — join as a regular peer instead
+      myPeer.destroy();
+      joinAsGuest();
+    } else {
+      setStatus('Connection error: ' + e.type, 'err');
+      console.error('peer error', e);
     }
   });
 }
 
-// ── join ──────────────────────────────────────────────────────────────────────
-function joinMesh() {
-  myName    = gel('nameIn').value.trim() || 'Anonymous';
-  myChannel = gel('chanIn').value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-') || 'mesh-default';
-  localStorage.setItem('mesh-name', myName);
-  localStorage.setItem('mesh-chan', gel('chanIn').value.trim());
-
-  gel('joinBtn').disabled = true;
-  setStatus('Connecting…');
-
-  // Each peer ID = channel + "-" + random suffix
-  // The "host" slot uses just the channel name — first to claim it is host
-  var hostId  = 'mesh-v1-' + myChannel;
-  var myId    = hostId + '-' + Math.random().toString(36).slice(2,8);
-
-  myPeer = new Peer(myId, {
-    host: '0.peerjs.com', port: 443, path: '/', secure: true,
-    debug: 0
+function joinAsGuest() {
+  myPeer = new Peer({
+    host: '0.peerjs.com', port: 443, path: '/', secure: true, debug: 0
   });
-
-  myPeer.on('open', function(id) {
-    setStatus('Waiting for peers · ' + myChannel, 'on');
-    gel('join').style.display = 'none';
-    gel('chat').style.display = 'flex';
-    addSys('You joined as "' + myName + '" on channel "' + myChannel + '"');
-
-    // Try to connect to host slot — if it exists we join, if not we become it
-    tryConnectHost(hostId, myId);
-  });
-
-  // Accept incoming connections (we might become the host)
-  myPeer.on('connection', function(conn) {
+  myPeer.on('open', function() {
+    showChat();
+    setStatus('Connecting to channel…', 'on');
+    // Connect to host
+    var conn = myPeer.connect(hostId, { reliable: true, serialization: 'json' });
     setupConn(conn);
+    // Also accept connections from others
+    myPeer.on('connection', function(c) { setupConn(c); });
   });
-
   myPeer.on('error', function(e) {
-    if (e.type === 'peer-unavailable') return; // expected when host slot empty
-    console.warn('peer error', e.type, e.message);
     setStatus('Error: ' + e.type, 'err');
+    console.error('guest peer error', e);
   });
 }
 
-function tryConnectHost(hostId, myId) {
-  if (myId === hostId) return; // we are the host
-  var conn = myPeer.connect(hostId, { reliable: true, serialization: 'json' });
-  conn.on('error', function() {}); // silently fail if host not up yet
-  setupConn(conn);
-
-  // Also try to claim host slot ourselves in parallel so others can find us
-  tryClaimHost(hostId);
+function showChat() {
+  gel('join').style.display = 'none';
+  gel('chat').style.display = 'flex';
+  gel('txt').focus();
 }
 
-function tryClaimHost(hostId) {
-  // Create a second Peer with the host ID — PeerJS will error if taken (that's fine)
-  var hostPeer = new Peer(hostId, {
-    host: '0.peerjs.com', port: 443, path: '/', secure: true,
-    debug: 0
-  });
-  hostPeer.on('open', function() {
-    // We claimed the host slot — accept connections on it too
-    hostPeer.on('connection', function(conn) {
-      setupConn(conn);
-      // Tell new peer about all existing peers
-      Object.keys(connections).forEach(function(pid) {
-        conn.on('open', function() {
-          conn.send({ type: 'peer', peerId: pid });
-        });
-      });
-    });
-    addSys('You are the first in this channel');
-  });
-  hostPeer.on('error', function(e) {
-    // Host slot taken — that's fine, we connected to them already
-  });
-}
-
-// ── send ──────────────────────────────────────────────────────────────────────
 function doSend() {
   var txt = gel('txt').value.trim();
   if (!txt) return;
-  var data = { type: 'msg', text: txt, from: myName };
-  broadcast(data, null);
+  broadcast({ type: 'msg', text: txt }, null);
   addBubble(myName, txt, true);
   gel('txt').value = ''; gel('txt').style.height = 'auto';
 }
 
-// ── input UX ─────────────────────────────────────────────────────────────────
 var sn = localStorage.getItem('mesh-name');
 var sc = localStorage.getItem('mesh-chan');
 if (sn) gel('nameIn').value = sn;
 if (sc) gel('chanIn').value = sc;
 
 gel('txt').addEventListener('keydown', function(e) {
-  if (e.key==='Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
+  if (e.key==='Enter'&&!e.shiftKey){e.preventDefault();doSend();}
 });
 gel('txt').addEventListener('input', function() {
-  gel('txt').style.height = 'auto';
-  gel('txt').style.height = Math.min(gel('txt').scrollHeight,120)+'px';
+  gel('txt').style.height='auto';
+  gel('txt').style.height=Math.min(gel('txt').scrollHeight,120)+'px';
 });
-gel('nameIn').addEventListener('keydown', function(e) { if(e.key==='Enter') gel('chanIn').focus(); });
-gel('chanIn').addEventListener('keydown', function(e) { if(e.key==='Enter') joinMesh(); });
+gel('nameIn').addEventListener('keydown', function(e){if(e.key==='Enter')gel('chanIn').focus();});
+gel('chanIn').addEventListener('keydown', function(e){if(e.key==='Enter')joinMesh();});
 </script>
 </body>
 </html>
