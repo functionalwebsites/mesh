@@ -65,7 +65,7 @@
     <input type="text" id="chanIn" placeholder="e.g. cooper-test" maxlength="64" autocomplete="off">
   </div>
   <button class="btn" id="joinBtn" onclick="joinMesh()">Join Mesh</button>
-  <p class="hint">Same channel = same mesh. Messages are end-to-end encrypted P2P via WebRTC.</p>
+  <p class="hint">Same channel = same mesh. Messages travel peer-to-peer via WebRTC.</p>
 </div>
 
 <div id="chat">
@@ -86,207 +86,174 @@
 //# sourceMappingURL=peerjs.min.js.map
 </script>
 <script>
-var myPeer, myName, myChannel, hostId;
+// ── Strategy: each peer registers as "channel-RANDOM"
+// then immediately tries to connect to "channel-0", "channel-1", etc.
+// by probing slots. PeerJS peer-unavailable = slot empty (skip).
+// If conn opens = found a peer. We also poll every 5s for new peers.
+
+var myPeer, myName, myChannel;
 var connections = {};
 var peerNames   = {};
+var probing     = {};  // slots we're currently probing
+
+var PEERJS = { host: '0.peerjs.com', port: 443, path: '/', secure: true, debug: 0 };
+var MAX_SLOTS = 10;  // probe up to 10 slots per channel
 
 function gel(id) { return document.getElementById(id); }
-function msgTime() { return new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); }
+function msgTime() { return new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}); }
 function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-
 function setStatus(txt, state) {
   gel('status').textContent = txt;
-  gel('dot').className = 'dot' + (state ? ' '+state : '');
+  gel('dot').className = 'dot'+(state?' '+state:'');
 }
 function updateCount() {
   var n = Object.keys(connections).length;
-  gel('pcnt').textContent = n + (n===1?' peer':' peers');
-  gel('pcnt').style.display = n > 0 ? '' : 'none';
+  gel('pcnt').textContent = n+(n===1?' peer':' peers');
+  gel('pcnt').style.display = n>0?'':'none';
+  if (n>0) setStatus('Connected · '+myChannel+' ('+n+' peer'+(n===1?'':'s')+')', 'on');
+  else setStatus('Waiting for peers · '+myChannel, 'on');
 }
 function addSys(txt) {
-  var el = document.createElement('div');
-  el.className = 'sys'; el.textContent = txt;
-  gel('msgs').appendChild(el); gel('msgs').scrollTop = 99999;
+  var el=document.createElement('div'); el.className='sys'; el.textContent=txt;
+  gel('msgs').appendChild(el); gel('msgs').scrollTop=99999;
 }
-function addBubble(who, text, isMe) {
-  var el = document.createElement('div');
-  el.className = 'bubble ' + (isMe ? 'me' : 'them');
-  el.innerHTML = '<div class="who">'+escHtml(who)+'</div><div>'+escHtml(text)+'</div><div class="msgts">'+msgTime()+'</div>';
-  gel('msgs').appendChild(el); gel('msgs').scrollTop = 99999;
+function addBubble(who,text,isMe) {
+  var el=document.createElement('div');
+  el.className='bubble '+(isMe?'me':'them');
+  el.innerHTML='<div class="who">'+escHtml(who)+'</div><div>'+escHtml(text)+'</div><div class="msgts">'+msgTime()+'</div>';
+  gel('msgs').appendChild(el); gel('msgs').scrollTop=99999;
 }
-
 function broadcast(data, excludeId) {
   Object.keys(connections).forEach(function(pid) {
-    if (pid !== excludeId && connections[pid] && connections[pid].open) {
+    if (pid!==excludeId && connections[pid] && connections[pid].open)
       connections[pid].send(data);
-    }
   });
 }
 
 function setupConn(conn) {
   function onOpen() {
+    if (connections[conn.peer]) return; // already connected
     connections[conn.peer] = conn;
-    conn.send({ type: 'name', name: myName });
+    conn.send({type:'name', name:myName, id:myPeer.id});
     updateCount();
-    setStatus('Connected · ' + myChannel, 'on');
   }
-  // Safari sometimes misses the open event if conn is already open
-  if (conn.open) { onOpen(); } else { conn.on('open', onOpen); }
+  if (conn.open) onOpen(); else conn.on('open', onOpen);
+
   conn.on('data', function(data) {
-    if (data.type === 'name') {
-      var wasUnknown = !peerNames[conn.peer];
+    if (data.type==='name') {
+      var fresh = !peerNames[conn.peer];
       peerNames[conn.peer] = data.name;
-      if (wasUnknown) addSys(data.name + ' joined');
-    } else if (data.type === 'msg') {
-      var who = peerNames[conn.peer] || conn.peer.slice(-6);
-      addBubble(who, data.text, false);
-      broadcast(data, conn.peer);
-    } else if (data.type === 'id') {
-      // Connect directly to peer's real ID for future messages
-      if (data.peerId && data.peerId !== myPeer.id && !connections[data.peerId]) {
-        var direct = myPeer.connect(data.peerId, { reliable: true });
-        setupConn(direct);
+      if (fresh) {
+        addSys(data.name+' joined');
+        // They told us their real peer ID — make sure we're connected to it
+        if (data.id && data.id!==myPeer.id && !connections[data.id]) {
+          var c2 = myPeer.connect(data.id, {reliable:true});
+          setupConn(c2);
+        }
       }
+    } else if (data.type==='msg') {
+      addBubble(peerNames[conn.peer]||conn.peer.slice(-6), data.text, false);
+      broadcast(data, conn.peer);
     }
   });
+
   conn.on('close', function() {
-    var who = peerNames[conn.peer] || 'A peer';
+    var who = peerNames[conn.peer]||'A peer';
     delete connections[conn.peer];
     delete peerNames[conn.peer];
     updateCount();
-    addSys(who + ' left');
-    if (Object.keys(connections).length === 0) setStatus('Waiting for peers · ' + myChannel, 'on');
+    addSys(who+' left');
   });
-  conn.on('error', function(e) { console.warn('conn err', e); });
+  conn.on('error', function(e){ console.warn('conn err',e); });
 }
 
-function makeBeaconId(channel, offset) {
-  // Rotates every hour so stale IDs expire. offset=0 current, offset=-1 previous hour.
-  var slot = Math.floor(Date.now() / 3600000) + (offset || 0);
-  return 'msh-' + channel + '-' + slot;
+// Probe a numbered slot — connect if it exists, skip if not
+function probeSlot(n) {
+  var slotId = myChannel+'-'+n;
+  if (slotId===myPeer.id || connections[slotId] || probing[slotId]) return;
+  probing[slotId] = true;
+
+  var conn = myPeer.connect(slotId, {reliable:true});
+  var done = false;
+
+  conn.on('open', function() {
+    done = true;
+    delete probing[slotId];
+    setupConn(conn);
+  });
+
+  // peer-unavailable fires on the PEER object, not the conn
+  // so we use a timeout to detect no-answer
+  setTimeout(function() {
+    if (!done) {
+      delete probing[slotId];
+      conn.close();
+    }
+  }, 3000);
+}
+
+function scanChannel() {
+  for (var i=0; i<MAX_SLOTS; i++) probeSlot(i);
 }
 
 function joinMesh() {
-  myName    = gel('nameIn').value.trim() || 'Anonymous';
-  myChannel = gel('chanIn').value.trim().toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g,'-').replace(/^-|-$/g,'') || 'mesh';
+  myName = gel('nameIn').value.trim()||'Anonymous';
+  myChannel = 'msh-'+(gel('chanIn').value.trim().toLowerCase().replace(/[^a-z0-9]/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'')||'mesh');
   localStorage.setItem('mesh-name', myName);
   localStorage.setItem('mesh-chan', gel('chanIn').value.trim());
   gel('joinBtn').disabled = true;
   setStatus('Connecting…');
 
-  // Each peer gets a random ID, but also tries to hold a beacon ID for the channel
-  myPeer = new Peer({
-    host: '0.peerjs.com', port: 443, path: '/', secure: true, debug: 0
-  });
+  // Register with channel prefix + random suffix
+  var mySlot = myChannel+'-'+Math.floor(Math.random()*9000+1000);
 
-  myPeer.on('open', function(myId) {
-    showChat();
-    setStatus('Joining channel…', 'on');
-    // Accept any incoming connections
-    myPeer.on('connection', function(conn) { setupConn(conn); });
-    // Try to connect to current beacon, then previous hour's beacon
-    tryBeacon(myId, 0);
+  myPeer = new Peer(mySlot, PEERJS);
+
+  myPeer.on('open', function() {
+    gel('join').style.display='none';
+    gel('chat').style.display='flex';
+    gel('txt').focus();
+    addSys('You joined as "'+myName+'" — scanning for peers…');
+    setStatus('Scanning…', 'on');
+
+    // Accept incoming
+    myPeer.on('connection', function(conn){ setupConn(conn); });
+
+    // Scan for existing peers
+    scanChannel();
+    // Re-scan every 5s for new arrivals
+    setInterval(scanChannel, 5000);
   });
 
   myPeer.on('error', function(e) {
-    setStatus('Error: ' + e.type, 'err');
-    console.error('peer error', e);
-  });
-}
-
-function tryBeacon(myId, offset) {
-  hostId = makeBeaconId(myChannel, offset);
-
-  // Skip trying to connect to ourselves
-  if (hostId === myId) {
-    claimBeacon(myId);
-    return;
-  }
-
-  // Try connecting to existing beacon
-  var conn = myPeer.connect(hostId, { reliable: true });
-  var timer = setTimeout(function() {
-    // No open event after 4s — beacon probably not held, try to claim it
-    conn.close();
-    if (offset === 0) {
-      tryBeacon(myId, -1); // try previous hour slot
-    } else {
-      claimBeacon(myId);   // nobody home, we become the beacon
+    if (e.type==='unavailable-id') {
+      // Slot taken, pick another
+      myPeer.destroy();
+      joinMesh();
+      return;
     }
-  }, 4000);
-
-  conn.on('open', function() {
-    clearTimeout(timer);
-    addSys('Found channel "' + myChannel + '"');
-    setupConn(conn);
+    if (e.type==='peer-unavailable') return; // expected during probing
+    setStatus('Error: '+e.type,'err');
+    console.error(e);
   });
-
-  conn.on('error', function() {
-    clearTimeout(timer);
-    if (offset === 0) {
-      tryBeacon(myId, -1);
-    } else {
-      claimBeacon(myId);
-    }
-  });
-}
-
-function claimBeacon(myId) {
-  hostId = makeBeaconId(myChannel, 0);
-  // Try to also register the beacon ID as a second peer so others can find us
-  var beacon = new Peer(hostId, {
-    host: '0.peerjs.com', port: 443, path: '/', secure: true, debug: 0
-  });
-  beacon.on('open', function() {
-    addSys('You are first in "' + myChannel + '" — waiting for others…');
-    setStatus('Waiting for peers · ' + myChannel, 'on');
-    beacon.on('connection', function(conn) {
-      // New peer connected to beacon — wire them to our main peer
-      setupConn(conn);
-      // Tell them our actual peer ID so they can connect directly too
-      conn.on('open', function() {
-        conn.send({ type: 'id', peerId: myId });
-      });
-    });
-  });
-  beacon.on('error', function(e) {
-    // Beacon slot taken by someone who just joined — connect to them instead
-    if (e.type === 'unavailable-id') {
-      addSys('Joining existing channel…');
-      var conn = myPeer.connect(hostId, { reliable: true });
-      setupConn(conn);
-    }
-  });
-}
-
-function showChat() {
-  gel('join').style.display = 'none';
-  gel('chat').style.display = 'flex';
-  gel('txt').focus();
 }
 
 function doSend() {
   var txt = gel('txt').value.trim();
   if (!txt) return;
-  broadcast({ type: 'msg', text: txt }, null);
+  broadcast({type:'msg', text:txt}, null);
   addBubble(myName, txt, true);
-  gel('txt').value = ''; gel('txt').style.height = 'auto';
+  gel('txt').value=''; gel('txt').style.height='auto';
 }
 
-var sn = localStorage.getItem('mesh-name');
-var sc = localStorage.getItem('mesh-chan');
-if (sn) gel('nameIn').value = sn;
-if (sc) gel('chanIn').value = sc;
+var sn=localStorage.getItem('mesh-name'), sc=localStorage.getItem('mesh-chan');
+if (sn) gel('nameIn').value=sn;
+if (sc) gel('chanIn').value=sc;
 
-gel('txt').addEventListener('keydown', function(e) {
-  if (e.key==='Enter'&&!e.shiftKey){e.preventDefault();doSend();}
-});
-gel('txt').addEventListener('input', function() {
-  gel('txt').style.height='auto';
-  gel('txt').style.height=Math.min(gel('txt').scrollHeight,120)+'px';
-});
-gel('nameIn').addEventListener('keydown', function(e){if(e.key==='Enter')gel('chanIn').focus();});
-gel('chanIn').addEventListener('keydown', function(e){if(e.key==='Enter')joinMesh();});
+gel('txt').addEventListener('keydown',function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();doSend();}});
+gel('txt').addEventListener('input',function(){gel('txt').style.height='auto';gel('txt').style.height=Math.min(gel('txt').scrollHeight,120)+'px';});
+gel('nameIn').addEventListener('keydown',function(e){if(e.key==='Enter')gel('chanIn').focus();});
+gel('chanIn').addEventListener('keydown',function(e){if(e.key==='Enter')joinMesh();});
 </script>
 </body>
 </html>
