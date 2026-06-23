@@ -141,6 +141,12 @@ function setupConn(conn) {
       var who = peerNames[conn.peer] || conn.peer.slice(-6);
       addBubble(who, data.text, false);
       broadcast(data, conn.peer);
+    } else if (data.type === 'id') {
+      // Connect directly to peer's real ID for future messages
+      if (data.peerId && data.peerId !== myPeer.id && !connections[data.peerId]) {
+        var direct = myPeer.connect(data.peerId, { reliable: true });
+        setupConn(direct);
+      }
     }
   });
   conn.on('close', function() {
@@ -154,62 +160,102 @@ function setupConn(conn) {
   conn.on('error', function(e) { console.warn('conn err', e); });
 }
 
+function makeBeaconId(channel, offset) {
+  // Rotates every hour so stale IDs expire. offset=0 current, offset=-1 previous hour.
+  var slot = Math.floor(Date.now() / 3600000) + (offset || 0);
+  return 'msh-' + channel + '-' + slot;
+}
+
 function joinMesh() {
   myName    = gel('nameIn').value.trim() || 'Anonymous';
   myChannel = gel('chanIn').value.trim().toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g,'-').replace(/^-|-$/g,'') || 'mesh';
-  hostId    = 'meshnet-v2-' + myChannel;
   localStorage.setItem('mesh-name', myName);
   localStorage.setItem('mesh-chan', gel('chanIn').value.trim());
   gel('joinBtn').disabled = true;
   setStatus('Connecting…');
 
-  // Try to register AS the host first
-  myPeer = new Peer(hostId, {
+  // Each peer gets a random ID, but also tries to hold a beacon ID for the channel
+  myPeer = new Peer({
     host: '0.peerjs.com', port: 443, path: '/', secure: true, debug: 0
   });
 
-  myPeer.on('open', function() {
-    // We ARE the host — wait for others to connect to us
+  myPeer.on('open', function(myId) {
     showChat();
-    addSys('You are first in "' + myChannel + '" — waiting for others…');
-    setStatus('Waiting for peers · ' + myChannel, 'on');
+    setStatus('Joining channel…', 'on');
+    // Accept any incoming connections
     myPeer.on('connection', function(conn) { setupConn(conn); });
+    // Try to connect to current beacon, then previous hour's beacon
+    tryBeacon(myId, 0);
   });
 
   myPeer.on('error', function(e) {
-    if (e.type === 'unavailable-id') {
-      // Host slot taken — join as a regular peer instead
-      myPeer.destroy();
-      joinAsGuest();
+    setStatus('Error: ' + e.type, 'err');
+    console.error('peer error', e);
+  });
+}
+
+function tryBeacon(myId, offset) {
+  hostId = makeBeaconId(myChannel, offset);
+
+  // Skip trying to connect to ourselves
+  if (hostId === myId) {
+    claimBeacon(myId);
+    return;
+  }
+
+  // Try connecting to existing beacon
+  var conn = myPeer.connect(hostId, { reliable: true });
+  var timer = setTimeout(function() {
+    // No open event after 4s — beacon probably not held, try to claim it
+    conn.close();
+    if (offset === 0) {
+      tryBeacon(myId, -1); // try previous hour slot
     } else {
-      setStatus('Connection error: ' + e.type, 'err');
-      console.error('peer error', e);
+      claimBeacon(myId);   // nobody home, we become the beacon
+    }
+  }, 4000);
+
+  conn.on('open', function() {
+    clearTimeout(timer);
+    addSys('Found channel "' + myChannel + '"');
+    setupConn(conn);
+  });
+
+  conn.on('error', function() {
+    clearTimeout(timer);
+    if (offset === 0) {
+      tryBeacon(myId, -1);
+    } else {
+      claimBeacon(myId);
     }
   });
 }
 
-function joinAsGuest() {
-  myPeer = new Peer({
+function claimBeacon(myId) {
+  hostId = makeBeaconId(myChannel, 0);
+  // Try to also register the beacon ID as a second peer so others can find us
+  var beacon = new Peer(hostId, {
     host: '0.peerjs.com', port: 443, path: '/', secure: true, debug: 0
   });
-  myPeer.on('open', function() {
-    showChat();
-    setStatus('Connecting to channel…', 'on');
-    // Connect to host — no serialization option, use PeerJS defaults
-    var conn = myPeer.connect(hostId, { reliable: true });
-    setupConn(conn);
-    // Also accept connections from others
-    myPeer.on('connection', function(c) { setupConn(c); });
+  beacon.on('open', function() {
+    addSys('You are first in "' + myChannel + '" — waiting for others…');
+    setStatus('Waiting for peers · ' + myChannel, 'on');
+    beacon.on('connection', function(conn) {
+      // New peer connected to beacon — wire them to our main peer
+      setupConn(conn);
+      // Tell them our actual peer ID so they can connect directly too
+      conn.on('open', function() {
+        conn.send({ type: 'id', peerId: myId });
+      });
+    });
   });
-  myPeer.on('error', function(e) {
-    if (e.type === 'peer-unavailable') {
-      // Host disappeared between our check and connect — retry once
-      addSys('Host not found, retrying…');
-      setTimeout(joinMesh, 2000);
-      return;
+  beacon.on('error', function(e) {
+    // Beacon slot taken by someone who just joined — connect to them instead
+    if (e.type === 'unavailable-id') {
+      addSys('Joining existing channel…');
+      var conn = myPeer.connect(hostId, { reliable: true });
+      setupConn(conn);
     }
-    setStatus('Error: ' + e.type, 'err');
-    console.error('guest peer error', e);
   });
 }
 
