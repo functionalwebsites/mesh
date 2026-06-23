@@ -202,23 +202,13 @@ function setupConn(conn) {
 }
 
 var probing = {};
-var scanInterval = null;
-var reconnecting = false;
-
-function peerReady() {
-  return myPeer && !myPeer.disconnected && !myPeer.destroyed;
-}
-
 function probeSlot(sid) {
   if (!sid || sid === mySlotId || connections[sid] || probing[sid]) return;
-  if (!peerReady()) return;
   probing[sid] = true;
-  var conn;
-  try { conn = myPeer.connect(sid, {reliable:true}); } catch(e) { delete probing[sid]; return; }
-  if (!conn) { delete probing[sid]; return; }
+  var conn = myPeer.connect(sid, {reliable:true});
   var t = setTimeout(function(){
     delete probing[sid];
-    try { conn.close(); } catch(e) {}
+    conn.close();
   }, 5000);
   conn.on('open', function(){
     clearTimeout(t);
@@ -232,20 +222,12 @@ function probeSlot(sid) {
 }
 
 function scan() {
-  if (!peerReady()) return;
   currentSlots().forEach(probeSlot);
-}
-
-function reconnect() {
-  if (reconnecting || !myPeer || myPeer.destroyed) return;
-  reconnecting = true;
-  setStatus('Reconnecting…', '');
-  try { myPeer.reconnect(); } catch(e) {}
-  setTimeout(function(){ reconnecting = false; }, 5000);
 }
 
 function claimSlot(n, window) {
   if (n >= SLOTS) {
+    // All slots taken — just connect as participant
     mySlotId = 'guest-' + Math.random().toString(36).slice(2,10);
     myPeer = new Peer(mySlotId, PEERJS);
     myPeer.on('open', function(){ onReady(); });
@@ -264,7 +246,7 @@ function claimSlot(n, window) {
       p.destroy();
       claimSlot(n+1, window);
     } else if (e.type !== 'peer-unavailable') {
-      console.warn('slot claim error', e.type);
+      console.error('slot claim error', e.type);
     }
   });
 }
@@ -277,13 +259,10 @@ function onReady() {
   addSys('You joined as "' + myName + '"');
 
   myPeer.on('connection', function(conn){ setupConn(conn); });
-  myPeer.on('error', function(e){ if(e.type!=='peer-unavailable') console.warn('peer err', e.type); });
-  myPeer.on('disconnected', function(){ setStatus('Signal lost — reconnecting…', 'err'); reconnect(); });
-  myPeer.on('close', function(){ setStatus('Disconnected', 'err'); });
+  myPeer.on('error', function(e){ if(e.type!=='peer-unavailable') console.error(e); });
 
   scan();
-  if (scanInterval) clearInterval(scanInterval);
-  scanInterval = setInterval(scan, 8000);
+  setInterval(scan, 8000);
 }
 
 function joinMesh() {
