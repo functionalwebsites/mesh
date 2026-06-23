@@ -124,12 +124,14 @@ function broadcast(data, excludeId) {
 }
 
 function setupConn(conn) {
-  conn.on('open', function() {
+  function onOpen() {
     connections[conn.peer] = conn;
     conn.send({ type: 'name', name: myName });
     updateCount();
     setStatus('Connected · ' + myChannel, 'on');
-  });
+  }
+  // Safari sometimes misses the open event if conn is already open
+  if (conn.open) { onOpen(); } else { conn.on('open', onOpen); }
   conn.on('data', function(data) {
     if (data.type === 'name') {
       var wasUnknown = !peerNames[conn.peer];
@@ -193,13 +195,19 @@ function joinAsGuest() {
   myPeer.on('open', function() {
     showChat();
     setStatus('Connecting to channel…', 'on');
-    // Connect to host
-    var conn = myPeer.connect(hostId, { reliable: true, serialization: 'json' });
+    // Connect to host — no serialization option, use PeerJS defaults
+    var conn = myPeer.connect(hostId, { reliable: true });
     setupConn(conn);
     // Also accept connections from others
     myPeer.on('connection', function(c) { setupConn(c); });
   });
   myPeer.on('error', function(e) {
+    if (e.type === 'peer-unavailable') {
+      // Host disappeared between our check and connect — retry once
+      addSys('Host not found, retrying…');
+      setTimeout(joinMesh, 2000);
+      return;
+    }
     setStatus('Error: ' + e.type, 'err');
     console.error('guest peer error', e);
   });
