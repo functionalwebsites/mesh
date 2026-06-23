@@ -84,7 +84,7 @@
 */
 </script>
 <script>
-var room, msgSend, nameSend, myName, peerNames = {}, peerCount = 0;
+var room, msgAction, nameAction, myName, peerNames = {}, peerCount = 0;
 
 function gel(id) { return document.getElementById(id); }
 function msgTime() { return new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); }
@@ -119,19 +119,13 @@ function joinMesh() {
 
   room = Trystero.joinRoom({ appId: 'mesh-network-v1' }, channel);
 
-  // makeAction returns [sendFn, actionObject]
-  // actionObject has .onMessage callback property
-  var msgAction = room.makeAction('msg');
-  var nameAction = room.makeAction('name');
-
-  msgSend  = msgAction[0];   // send function
-  nameSend = nameAction[0];  // send function
-  var msgReceiver  = msgAction[1];   // has .onMessage
-  var nameReceiver = nameAction[1];  // has .onMessage
+  // makeAction returns a single action object with .send and .onMessage
+  msgAction  = room.makeAction('msg');
+  nameAction = room.makeAction('name');
 
   room.onPeerJoin = function(peerId) {
     peerCount++; updateCount();
-    nameSend(myName, {target: peerId});
+    nameAction.send(myName, {target: peerId});
     addSys('Someone joined the mesh');
     setStatus('Connected · ' + channel, 'on');
   };
@@ -144,7 +138,7 @@ function joinMesh() {
     if (peerCount === 0) setStatus('Waiting for peers · ' + channel, 'on');
   };
 
-  nameReceiver.onMessage = function(name, info) {
+  nameAction.onMessage = function(name, info) {
     var peerId = info.peerId;
     var isNew = !peerNames[peerId];
     peerNames[peerId] = name;
@@ -158,7 +152,7 @@ function joinMesh() {
     }
   };
 
-  msgReceiver.onMessage = function(text, info) {
+  msgAction.onMessage = function(text, info) {
     addBubble(peerNames[info.peerId] || info.peerId.slice(0,6), text, false);
   };
 
@@ -171,13 +165,12 @@ function joinMesh() {
 
 function doSend() {
   var txt = gel('txt').value.trim();
-  if (!txt || !msgSend) return;
-  msgSend(txt);
+  if (!txt || !msgAction) return;
+  msgAction.send(txt);
   addBubble(myName, txt, true);
   gel('txt').value = ''; gel('txt').style.height = 'auto';
 }
 
-// Restore saved values
 var sn = localStorage.getItem('mesh-name');
 var sc = localStorage.getItem('mesh-chan');
 if (sn) gel('nameIn').value = sn;
