@@ -1,5 +1,13 @@
 {
+  "name": "mesh-node",
+  "version": "1.0.0",
+  "description": "Mesh network node",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
-    "ws": "^8.21.0"
+    "ws": "^8.18.0",
+    "nat-upnp-2": "^2.0.0"
   }
 }
